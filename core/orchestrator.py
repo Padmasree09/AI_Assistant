@@ -1,0 +1,149 @@
+from __future__ import annotations
+
+import logging
+import time
+from collections import OrderedDict
+
+from agents.critic import Critic
+from agents.planner import Planner
+from models.schemas import QueryType
+from router.query_router import classify_query
+from services.cache import ResponseCache
+from services.llm import call_llm
+from services.memory import SessionMemory
+
+
+class Orchestrator:
+    """Central brain coordinating planning, tool-based execution, critique, and memory."""
+
+    def __init__(
+        self,
+        agent_registry: dict[QueryType, object],
+        planner: Planner | None = None,
+        critic: Critic | None = None,
+        memory: SessionMemory | None = None,
+        cache: ResponseCache | None = None,
+    ) -> None:
+        self.agent_registry = agent_registry
+        self.planner = planner or Planner()
+        self.critic = critic or Critic()
+        self.memory = memory or SessionMemory()
+        self.cache = cache or ResponseCache()
+        self.logger = logging.getLogger("ai_research_assistant.orchestrator")
+
+    def handle_query(self, query: str, top_k: int = 5, session_id: str = "default") -> dict:
+        t0 = time.perf_counter()
+        query_type = classify_query(query)
+        self.logger.info("orchestrator.query_type", extra={"query_type": query_type.value})
+
+        cache_key = self.cache.build_key(query, top_k)
+        cached = self.cache.get(cache_key)
+        if cached is not None:
+            self.logger.info("orchestrator.cache_hit", extra={"session_id": session_id})
+            return {
+                "query_type": query_type,
+                "answer": cached["answer"],
+                "sources": cached["sources"],
+                "meta": {"cached": True, "latency_ms": round((time.perf_counter() - t0) * 1000, 2)},
+            }
+
+        history = self.memory.format_history(session_id=session_id, limit=3)
+        working_query = query
+        if history:
+            working_query = (
+                "Use the recent conversation context when relevant.\n"
+                f"Conversation:\n{history}\n\n"
+                f"Current user question: {query}"
+            )
+
+        plan = self.planner.create_plan(working_query, query_type)
+        step_outputs = []
+        source_bag: OrderedDict[str, None] = OrderedDict()
+
+        for step in plan:
+            step_start = time.perf_counter()
+            agent = self.agent_registry.get(step.agent_type, self.agent_registry[query_type])
+
+            step_prompt = f"Step objective: {step.description}\n\nUser query with context: {working_query}"
+            result = agent.run(step_prompt, top_k=top_k)
+
+            for src in result.get("sources", []):
+                source_bag[src] = None
+
+            step_latency_ms = round((time.perf_counter() - step_start) * 1000, 2)
+            self.logger.info(
+                "orchestrator.step_complete",
+                extra={
+                    "step_id": step.id,
+                    "agent": step.agent_type.value,
+                    "latency_ms": step_latency_ms,
+                    "retrieval_count": len(result.get("sources", [])),
+                },
+            )
+            step_outputs.append(
+                {
+                    "step": step.description,
+                    "agent": step.agent_type.value,
+                    "answer": result.get("answer", ""),
+                }
+            )
+
+        synthesized_answer = self._synthesize_answer(query=query, query_type=query_type, step_outputs=step_outputs, history=history)
+
+        evidence_context = "\n\n".join(output["answer"] for output in step_outputs)
+        critique = self.critic.review(query=query, answer=synthesized_answer, context=evidence_context)
+
+        if critique["needs_revision"]:
+            synthesized_answer = self._revise_answer(query=query, query_type=query_type, current_answer=synthesized_answer, feedback=critique["feedback"], evidence=evidence_context)
+
+        final_sources = list(source_bag.keys())
+        self.memory.add_turn(session_id=session_id, query=query, answer=synthesized_answer)
+        self.cache.set(cache_key, {"answer": synthesized_answer, "sources": final_sources})
+
+        total_latency_ms = round((time.perf_counter() - t0) * 1000, 2)
+        self.logger.info("orchestrator.complete", extra={"latency_ms": total_latency_ms, "steps": len(plan)})
+
+        return {
+            "query_type": query_type,
+            "answer": synthesized_answer,
+            "sources": final_sources,
+            "meta": {"cached": False, "latency_ms": total_latency_ms, "steps": len(plan), "critique": critique},
+        }
+
+    def _synthesize_answer(self, query: str, query_type: QueryType, step_outputs: list[dict], history: str) -> str:
+        reasoning_trace = "\n\n".join(
+            f"Step: {item['step']}\nAgent: {item['agent']}\nOutput:\n{item['answer']}" for item in step_outputs
+        )
+        prompt = f"""You are the final response composer for an offline AI assistant.
+Use the step outputs below to write one coherent answer.
+
+Query type: {query_type.value}
+User query: {query}
+Conversation context:
+{history or "(none)"}
+
+Step outputs:
+{reasoning_trace}
+
+Requirements:
+- Stay grounded in the provided outputs
+- Keep the answer relevant and complete
+- If evidence is weak, clearly state uncertainty
+"""
+        return call_llm(prompt, max_tokens=700)
+
+    def _revise_answer(self, query: str, query_type: QueryType, current_answer: str, feedback: str, evidence: str) -> str:
+        prompt = f"""Improve the answer based on critic feedback.
+
+Query type: {query_type.value}
+User query: {query}
+Critic feedback: {feedback}
+Current answer:
+{current_answer}
+
+Evidence:
+{evidence[:3000]}
+
+Return an improved final answer only.
+"""
+        return call_llm(prompt, max_tokens=700)
