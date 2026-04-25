@@ -60,7 +60,7 @@ def get_settings() -> Settings:
         planner_max_tokens=int(os.getenv("PLANNER_MAX_TOKENS", "96")),
         synthesis_max_tokens=int(os.getenv("SYNTHESIS_MAX_TOKENS", "256")),
         critique_max_tokens=int(os.getenv("CRITIQUE_MAX_TOKENS", "96")),
-        use_llm_planner=_env_bool("USE_LLM_PLANNER", "true"),
+        use_llm_planner=_env_bool("USE_LLM_PLANNER", "false"),
         enable_critic=_env_bool("ENABLE_CRITIC", "true"),
         retriever_mode=os.getenv("RETRIEVER_MODE", "server").lower(),
         qdrant_host=os.getenv("QDRANT_HOST", "localhost"),

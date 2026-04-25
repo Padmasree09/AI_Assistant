@@ -10,6 +10,7 @@ from qdrant_client.models import Distance, PointStruct, VectorParams
 from sentence_transformers import SentenceTransformer
 
 from core.config import get_settings
+from services.chunker import chunk_text
 
 client: QdrantClient | None = None
 embedder: SentenceTransformer | None = None
@@ -88,7 +89,8 @@ def ensure_collection() -> None:
     )
 
 
-def index_documents(documents: list[dict]) -> int:
+def index_documents(documents: list[dict], chunk_size: int = 200, chunk_overlap: int = 50) -> int:
+    """Index documents into Qdrant, chunking long texts automatically."""
     if not documents:
         return 0
 
@@ -96,18 +98,28 @@ def index_documents(documents: list[dict]) -> int:
     ensure_collection()
 
     points = []
-    for idx, doc in enumerate(documents, start=1):
+    point_id = 0
+    for doc in documents:
         text = doc.get("text", "").strip()
         if not text:
             continue
 
-        points.append(
-            PointStruct(
-                id=idx,
-                vector=embed_document(text),
-                payload={"text": text, "source": doc.get("source", f"doc-{idx}")},
+        source = doc.get("source", f"doc-{point_id}")
+        chunks = chunk_text(text, chunk_size=chunk_size, overlap=chunk_overlap)
+
+        for chunk_idx, chunk in enumerate(chunks):
+            point_id += 1
+            points.append(
+                PointStruct(
+                    id=point_id,
+                    vector=embed_document(chunk),
+                    payload={
+                        "text": chunk,
+                        "source": source,
+                        "chunk_index": chunk_idx,
+                    },
+                )
             )
-        )
 
     if not points:
         return 0

@@ -6,7 +6,7 @@ from services.retriever import retrieve
 
 
 class BaseAgent:
-    max_tool_iterations = 2
+    max_tool_iterations = 1  # reduced from 2; saves 1 LLM call per agent step
 
     def build_prompt(self, query: str, context: str) -> str:
         raise NotImplementedError
@@ -51,9 +51,9 @@ class BaseAgent:
 
     def _should_refine(self, chunks: list[dict]) -> bool:
         if not chunks:
-            return True
+            return False  # no point refining if the collection is empty
         avg_score = sum(c.get("score", 0.0) for c in chunks) / len(chunks)
-        return avg_score < 0.35
+        return avg_score < 0.20  # lowered from 0.35; only refine truly bad results
 
     def _refine_query(self, original_query: str, chunks: list[dict]) -> str:
         sample_context = "\n".join(c.get("text", "")[:180] for c in chunks[:2])

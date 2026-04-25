@@ -92,10 +92,16 @@ class Orchestrator:
         synthesized_answer = self._synthesize_answer(query=query, query_type=query_type, step_outputs=step_outputs, history=history)
 
         evidence_context = "\n\n".join(output["answer"] for output in step_outputs)
-        if get_settings().enable_critic:
+        # Only run the expensive critic for multi-step plans or reasoning queries
+        # to save LLM calls on simple QA / summary tasks.
+        should_critique = (
+            get_settings().enable_critic
+            and (len(plan) > 1 or query_type == QueryType.REASONING)
+        )
+        if should_critique:
             critique = self.critic.review(query=query, answer=synthesized_answer, context=evidence_context)
         else:
-            critique = {"score": None, "needs_revision": False, "feedback": "Critic disabled for this run."}
+            critique = {"score": None, "needs_revision": False, "feedback": "Critic skipped (simple query)."}
 
         if critique["needs_revision"]:
             synthesized_answer = self._revise_answer(query=query, query_type=query_type, current_answer=synthesized_answer, feedback=critique["feedback"], evidence=evidence_context)
@@ -162,3 +168,68 @@ Rules:
 Return only the improved final answer text.
 """
         return call_llm(prompt, max_tokens=get_settings().synthesis_max_tokens)
+
+    # ------------------------------------------------------------------
+    # Streaming helper: runs everything except the final synthesis call
+    # ------------------------------------------------------------------
+    def prepare_query(self, query: str, top_k: int = 5, session_id: str = "default") -> dict:
+        """Run route -> plan -> agent execution and return the synthesis prompt.
+
+        Used by the ``/query/stream`` SSE endpoint so it can stream the
+        final synthesis tokens instead of waiting for the full answer.
+        """
+        query_type = classify_query(query)
+        history = self.memory.format_history(session_id=session_id, limit=3)
+        working_query = query
+        if history:
+            working_query = (
+                "Use the recent conversation context when relevant.\n"
+                f"Conversation:\n{history}\n\n"
+                f"Current user question: {query}"
+            )
+
+        plan = self.planner.create_plan(working_query, query_type)
+        step_outputs = []
+        source_bag: OrderedDict[str, None] = OrderedDict()
+
+        for step in plan:
+            agent = self.agent_registry.get(step.agent_type, self.agent_registry[query_type])
+            step_prompt = f"Step objective: {step.description}\n\nUser query with context: {working_query}"
+            result = agent.run(step_prompt, top_k=top_k)
+            for src in result.get("sources", []):
+                source_bag[src] = None
+            step_outputs.append(
+                {"step": step.description, "agent": step.agent_type.value, "answer": result.get("answer", "")}
+            )
+
+        synthesis_prompt = self._build_synthesis_prompt(
+            query=query, query_type=query_type, step_outputs=step_outputs, history=history
+        )
+        return {"synthesis_prompt": synthesis_prompt, "sources": list(source_bag.keys()), "query_type": query_type}
+
+    def _build_synthesis_prompt(self, query: str, query_type: QueryType, step_outputs: list[dict], history: str) -> str:
+        reasoning_trace = "\n\n".join(
+            f"Evidence {idx}:\nTask: {item['step']}\nAgent: {item['agent']}\nContent: {item['answer']}"
+            for idx, item in enumerate(step_outputs, start=1)
+        )
+        return f"""You are the final response composer for an offline AI assistant.
+Write one clean final answer using only the evidence below.
+
+Query type: {query_type.value}
+User query: {query}
+Conversation context:
+{history or "(none)"}
+
+Evidence:
+{reasoning_trace}
+
+Requirements:
+- Answer the user query directly
+- Keep the answer clean and presentable
+- Do not repeat prompt sections or metadata
+- Do not mention "query type", "conversation context", "step outputs", or "evidence"
+- Prefer 1-3 short paragraphs unless bullets clearly fit better
+- If evidence is weak, clearly state uncertainty in one sentence
+
+Return only the final answer text.
+"""

@@ -1,6 +1,7 @@
 import logging
 
 from fastapi import FastAPI, HTTPException
+from fastapi.responses import StreamingResponse
 
 from agents.qa_agent import QAAgent
 from agents.reasoning_agent import ReasoningAgent
@@ -48,3 +49,35 @@ async def query(request: QueryRequest):
 @app.get("/health")
 def health():
     return {"status": "running"}
+
+
+@app.post("/query/stream")
+async def query_stream(request: QueryRequest):
+    """SSE endpoint that streams the final synthesis token-by-token.
+
+    The pipeline (route -> plan -> agent execution) runs synchronously first,
+    then only the final synthesis step is streamed back.
+    """
+    import json as _json
+    from services.llm import call_llm_stream
+    from core.config import get_settings
+
+    try:
+        # Run everything except the final synthesis
+        partial = orchestrator.prepare_query(
+            query=request.query,
+            top_k=request.top_k,
+            session_id=request.session_id,
+        )
+
+        def _event_generator():
+            for token in call_llm_stream(
+                partial["synthesis_prompt"],
+                max_tokens=get_settings().synthesis_max_tokens,
+            ):
+                yield f"data: {_json.dumps({'token': token})}\n\n"
+            yield "data: [DONE]\n\n"
+
+        return StreamingResponse(_event_generator(), media_type="text/event-stream")
+    except Exception as exc:
+        raise HTTPException(status_code=500, detail=str(exc)) from exc
