@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from core.config import get_settings
 from services.llm import call_llm
 from services.retriever import retrieve
 
@@ -38,11 +39,13 @@ class BaseAgent:
             seen.add(key)
             unique_chunks.append(chunk)
 
-        context = "\n\n".join(c.get("text", "") for c in unique_chunks)
+        context = "\n\n".join(
+            f"Source: {c.get('source', 'unknown')}\nEvidence: {c.get('text', '')}" for c in unique_chunks
+        )
         sources = list(dict.fromkeys(c.get("source", "unknown") for c in unique_chunks))
 
         prompt = self.build_prompt(query, context)
-        answer = call_llm(prompt)
+        answer = call_llm(prompt, max_tokens=get_settings().agent_max_tokens)
 
         return {"answer": answer, "sources": sources}
 
@@ -62,7 +65,7 @@ Retrieved snippets:
 {sample_context or '(none)'}
 """
         try:
-            rewritten = call_llm(prompt, max_tokens=40).strip()
+            rewritten = call_llm(prompt, max_tokens=24).strip()
             return rewritten if rewritten else original_query
         except Exception:
             return original_query

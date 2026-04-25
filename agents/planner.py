@@ -4,6 +4,7 @@ import logging
 import re
 from dataclasses import dataclass
 
+from core.config import get_settings
 from models.schemas import QueryType
 from services.llm import call_llm
 
@@ -23,6 +24,10 @@ class Planner:
 
     def create_plan(self, query: str, query_type: QueryType) -> list[PlanStep]:
         heuristic_plan = self._heuristic_plan(query, query_type)
+        if not get_settings().use_llm_planner:
+            self.logger.info("planner.generated_plan", extra={"steps": len(heuristic_plan), "mode": "heuristic-only"})
+            return heuristic_plan
+
         llm_plan = self._llm_plan(query, query_type)
         if llm_plan:
             self.logger.info("planner.generated_plan", extra={"steps": len(llm_plan), "mode": "llm"})
@@ -44,7 +49,7 @@ User query: {query}
 Default type: {query_type.value}
 """
         try:
-            raw = call_llm(prompt, max_tokens=180)
+            raw = call_llm(prompt, max_tokens=get_settings().planner_max_tokens)
         except Exception as exc:  # pragma: no cover
             self.logger.warning("planner.llm_failure", extra={"error": str(exc)})
             return []
@@ -85,5 +90,4 @@ Default type: {query_type.value}
 
         return [
             PlanStep(1, f"Gather relevant evidence for: {query}", QueryType.RESEARCH if query_type == QueryType.REASONING else query_type),
-            PlanStep(2, "Synthesize a final answer grounded in retrieved evidence", query_type),
         ]

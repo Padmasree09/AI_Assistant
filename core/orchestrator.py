@@ -9,6 +9,7 @@ from agents.planner import Planner
 from models.schemas import QueryType
 from router.query_router import classify_query
 from services.cache import ResponseCache
+from core.config import get_settings
 from services.llm import call_llm
 from services.memory import SessionMemory
 
@@ -91,7 +92,10 @@ class Orchestrator:
         synthesized_answer = self._synthesize_answer(query=query, query_type=query_type, step_outputs=step_outputs, history=history)
 
         evidence_context = "\n\n".join(output["answer"] for output in step_outputs)
-        critique = self.critic.review(query=query, answer=synthesized_answer, context=evidence_context)
+        if get_settings().enable_critic:
+            critique = self.critic.review(query=query, answer=synthesized_answer, context=evidence_context)
+        else:
+            critique = {"score": None, "needs_revision": False, "feedback": "Critic disabled for this run."}
 
         if critique["needs_revision"]:
             synthesized_answer = self._revise_answer(query=query, query_type=query_type, current_answer=synthesized_answer, feedback=critique["feedback"], evidence=evidence_context)
@@ -112,25 +116,31 @@ class Orchestrator:
 
     def _synthesize_answer(self, query: str, query_type: QueryType, step_outputs: list[dict], history: str) -> str:
         reasoning_trace = "\n\n".join(
-            f"Step: {item['step']}\nAgent: {item['agent']}\nOutput:\n{item['answer']}" for item in step_outputs
+            f"Evidence {idx}:\nTask: {item['step']}\nAgent: {item['agent']}\nContent: {item['answer']}"
+            for idx, item in enumerate(step_outputs, start=1)
         )
         prompt = f"""You are the final response composer for an offline AI assistant.
-Use the step outputs below to write one coherent answer.
+Write one clean final answer using only the evidence below.
 
 Query type: {query_type.value}
 User query: {query}
 Conversation context:
 {history or "(none)"}
 
-Step outputs:
+Evidence:
 {reasoning_trace}
 
 Requirements:
-- Stay grounded in the provided outputs
-- Keep the answer relevant and complete
-- If evidence is weak, clearly state uncertainty
+- Answer the user query directly
+- Keep the answer clean and presentable
+- Do not repeat prompt sections or metadata
+- Do not mention "query type", "conversation context", "step outputs", or "evidence"
+- Prefer 1-3 short paragraphs unless bullets clearly fit better
+- If evidence is weak, clearly state uncertainty in one sentence
+
+Return only the final answer text.
 """
-        return call_llm(prompt, max_tokens=700)
+        return call_llm(prompt, max_tokens=get_settings().synthesis_max_tokens)
 
     def _revise_answer(self, query: str, query_type: QueryType, current_answer: str, feedback: str, evidence: str) -> str:
         prompt = f"""Improve the answer based on critic feedback.
@@ -144,6 +154,11 @@ Current answer:
 Evidence:
 {evidence[:3000]}
 
-Return an improved final answer only.
+Rules:
+- Keep the answer direct and polished
+- Remove prompt leakage or repeated metadata
+- Stay grounded in the evidence
+
+Return only the improved final answer text.
 """
-        return call_llm(prompt, max_tokens=700)
+        return call_llm(prompt, max_tokens=get_settings().synthesis_max_tokens)

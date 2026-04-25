@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 import logging
 
+from core.config import get_settings
 from services.llm import call_llm
 
 
@@ -31,7 +32,7 @@ Answer:
 {answer}
 """
         try:
-            raw = call_llm(prompt, max_tokens=140)
+            raw = call_llm(prompt, max_tokens=get_settings().critique_max_tokens)
             parsed = json.loads(raw)
             score = int(parsed.get("score", 0))
             needs_revision = bool(parsed.get("needs_revision", score < self.min_score))
