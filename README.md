@@ -163,10 +163,20 @@ Important variables:
 - `APP_PORT`
 - `LLAMA_URL`
 - `LLAMA_TIMEOUT_SECONDS`
+- `AGENT_MAX_TOKENS`
+- `PLANNER_MAX_TOKENS`
+- `SYNTHESIS_MAX_TOKENS`
+- `CRITIQUE_MAX_TOKENS`
+- `USE_LLM_PLANNER`
+- `ENABLE_CRITIC`
+- `RETRIEVER_MODE`
 - `QDRANT_HOST`
 - `QDRANT_PORT`
 - `QDRANT_COLLECTION`
+- `QDRANT_LOCAL_PATH`
+- `EMBEDDING_BACKEND`
 - `EMBEDDING_MODEL_NAME`
+- `EMBEDDING_SIZE`
 - `LLAMA_SERVER_EXE`
 - `LLAMA_MODEL_PATH`
 
@@ -203,7 +213,25 @@ copy .env.example .env
 
 Edit `.env` so the paths and URLs match your machine.
 
-### 4. Start Qdrant
+### 4. Choose a retriever mode
+
+For restricted local environments, use local Qdrant mode:
+
+```env
+RETRIEVER_MODE=local
+EMBEDDING_BACKEND=hash
+QDRANT_LOCAL_PATH=data/qdrant
+```
+
+For production-style deployment later, switch to server mode:
+
+```env
+RETRIEVER_MODE=server
+QDRANT_HOST=localhost
+QDRANT_PORT=6333
+```
+
+### 5. Start Qdrant
 
 If Docker is available:
 
@@ -217,7 +245,9 @@ Or on Windows:
 scripts\start_qdrant.bat
 ```
 
-### 5. Start the local LLM server
+If you are using `RETRIEVER_MODE=local`, you do not need to start a separate Qdrant server.
+
+### 6. Start the local LLM server
 
 Make sure your `.env` points to the correct `llama-server` executable and GGUF model path, then run:
 
@@ -225,13 +255,13 @@ Make sure your `.env` points to the correct `llama-server` executable and GGUF m
 scripts\start_llm_server.bat
 ```
 
-### 6. Run the API
+### 7. Run the API
 
 ```bat
 scripts\start_api.bat
 ```
 
-### 7. Test the API
+### 8. Test the API
 
 Health check:
 
@@ -246,6 +276,14 @@ curl -X POST http://localhost:8000/query \
   -H "Content-Type: application/json" \
   -d '{"query": "Explain transformer architecture"}'
 ```
+
+### 9. Optional: load sample data for local testing
+
+```bash
+python scripts/ingest_sample_data.py
+```
+
+This is useful when running in local Qdrant mode and you want a quick end-to-end test without setting up your own dataset.
 
 ## Example Flow
 
@@ -274,6 +312,7 @@ The system can:
 - Conversational memory
 - Response caching
 - Offline-capable design
+- Local Qdrant mode for Docker-restricted development environments
 
 ## Design Principles
 
@@ -295,7 +334,8 @@ The system can:
 
 - Quality depends heavily on the local model you run
 - Retrieval quality depends on how your vector store is populated
-- End-to-end offline behavior assumes all models and services are available locally
+- Hash-based embeddings are useful for offline testing but are weaker than real semantic embeddings
+- End-to-end offline behavior assumes all required local assets are available
 - Some advanced behaviors are architecture-oriented and may need further expansion for production use
 
 ## Reproducibility Notes
@@ -306,6 +346,7 @@ This repository is structured so that a new user can clone the code and reproduc
 - Large runtime assets such as GGUF models and inference binaries stay outside Git
 - Runtime behavior is controlled through `.env`
 - Helper scripts are included for local startup on Windows
+- The retriever can run in local mode for constrained machines and in server mode for production-style deployment
 
 This makes the project easier to share, maintain, and deploy without bloating the repository.
 
